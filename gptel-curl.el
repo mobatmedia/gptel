@@ -90,7 +90,8 @@ REQUEST-DATA is the data to send, TOKEN is a unique identifier."
     (append
      gptel-curl--common-args
      gptel-curl-extra-args
-     (gptel-backend-curl-args gptel-backend)
+     (let ((curl-args (gptel-backend-curl-args gptel-backend)))
+       (if (functionp curl-args) (funcall curl-args) curl-args))
      (list (format "-w(%s . %%{size_header})" token))
      (if (length< data-json gptel-curl-file-size-threshold)
          (list (format "-d%s" data-json))
@@ -133,6 +134,7 @@ the response is inserted into the current buffer after point."
                              (random) (emacs-pid) (user-full-name)
                              (recent-keys))))
          (info (gptel-fsm-info fsm))
+         (backend (plist-get info :backend))
          (args (gptel-curl--get-args info token))
          (stream (plist-get info :stream))
          (process (apply #'start-process "gptel-curl"
@@ -142,9 +144,20 @@ the response is inserted into the current buffer after point."
     ;; for cases when buffer coding system is not set to utf-8.
     (set-process-coding-system process 'utf-8-unix 'utf-8-unix)
     (when (eq gptel-log-level 'debug)
-      (gptel--log (mapconcat #'shell-quote-argument (cons "curl" args) " \\\n")
+      (gptel--log (mapconcat #'shell-quote-argument (cons (gptel-curl-path) args) " \\\n")
                   "request Curl command" 'no-json))
+
     (with-current-buffer (process-buffer process)
+      (cond
+       ((eq (gptel-backend-coding-system backend) 'binary)
+        ;; set-buffer-file-coding-system is not needed since we don't save this buffer
+        (set-buffer-multibyte nil)
+        (set-process-coding-system process 'binary 'binary))
+       ((memq system-type '(windows-nt ms-dos))
+        ;; Don't try to convert cr-lf to cr on Windows so that curl's "header size
+        ;; in bytes" stays correct
+        (set-process-coding-system process 'utf-8-unix 'utf-8-unix)))
+
       (set-process-query-on-exit-flag process nil)
       (if (plist-get info :token)       ;not the first run, set only the token
           (plist-put info :token token)
@@ -293,7 +306,7 @@ Optional RAW disables text properties and transformation."
         (goto-char (process-mark process))
         (insert output)
         (set-marker (process-mark process) (point)))
-      
+
       ;; Find HTTP status
       (unless (plist-get proc-info :http-status)
         (save-excursion
@@ -308,7 +321,7 @@ Optional RAW disables text properties and transformation."
             (plist-put proc-info :http-status http-status)
             (plist-put proc-info :status (string-trim http-msg))
             (gptel--fsm-transition fsm))))
-      
+
       (when-let* ((http-msg (plist-get proc-info :status))
                   (http-status (plist-get proc-info :http-status)))
         ;; Find data chunk(s) and run callback
