@@ -50,6 +50,7 @@
 ;; - LLM responses are in Markdown or Org markup.
 ;; - Supports conversations and multiple independent sessions.
 ;; - Supports tool-use to equip LLMs with agentic capabilities.
+;; - Supports Model Context Protocol (MCP) integration using the mcp.el package.
 ;; - Supports multi-modal models (send images, documents).
 ;; - Supports "reasoning" content in LLM responses.
 ;; - Save chats as regular Markdown/Org/Text files and resume them later.
@@ -136,6 +137,21 @@
 ;; prefix arg), as well as examine or modify context.
 ;;
 ;; When context is available, gptel will include it with each LLM query.
+;;
+;; LLM Tool use:
+;;
+;; gptel supports "tool calling" behavior, where LLMs can specify arguments with
+;; which to call provided "tools" (elisp functions).  The results of running the
+;; tools are fed back to the LLM, giving it capabilities and knowledge beyond
+;; what is available out of the box.  For example, tools can perform web
+;; searches or API lookups, modify files and directories, and so on.
+;;
+;; Tools can be specified via `gptel-make-tool', or obtained from other
+;; repositories, or from Model Context Protocol (MCP) servers using the mcp.el
+;; package.  See the README for details.
+;;
+;; Tools can be included with LLM queries using gptel's menu, or from
+;; `gptel-tools'.
 ;;
 ;; Rewrite interface
 ;;
@@ -1586,7 +1602,8 @@ feed the LLM the results.  You can add tools via
 
 (defun gptel--make-tool (&rest spec)
   "Construct a gptel-tool according to SPEC."
-  (apply #'gptel--make-tool-internal (gptel--preprocess-tool-args spec)))
+  (gptel--preprocess-tool-args (plist-get spec :args))
+  (apply #'gptel--make-tool-internal spec))
 
 (defvar gptel--known-tools nil
   "Alist of gptel tools arranged by category.
@@ -2152,7 +2169,7 @@ Run post-response hooks."
          (lambda (tool-call)
            (letrec ((args (plist-get tool-call :args))
                     (name (plist-get tool-call :name))
-                    (arg-values)
+                    (arg-values nil)
                     (tool-spec
                      (cl-find-if
                       (lambda (ts) (equal (gptel-tool-name ts) name))
