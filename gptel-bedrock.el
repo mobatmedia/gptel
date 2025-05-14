@@ -540,7 +540,7 @@ IDs can be added or replaced by calling
      (list
       "--user" (format "%s:%s" key-id secret)
       "--aws-sigv4" (format "aws:amz:%s:bedrock" region)
-      "--output" "/dev/stdout") ;; Without this curl swallows the output
+      ) ;; Delete for Windows: "--output" "/dev/stdout") ;; Without this curl swallows the output
      (when token
        (list (format "-Hx-amz-security-token: %s" token))))))
 
