@@ -566,7 +566,7 @@ Convenient to use with `cl-multiple-value-bind'"
                 (_ (user-error "Invalid AWS credential format in auth source"))))
           (user-error "Could not retrieve AWS credentials from auth source")))))
    ;; No valid credentials found
-   (t (user-error "Missing AWS credentials; tried environment variables, ~/.aws/credentials, and auth-source")))
+   (t (user-error "Missing AWS credentials; tried environment variables, ~/.aws/credentials, and auth-source"))))
 
 ;; Model handling for Bedrock
 
@@ -659,12 +659,12 @@ Convenient to use with `cl-multiple-value-bind'"
      :description "Meta's Llama 3.1 70B Instruct model"))
   "Registry of known Bedrock models with their properties.
 
-Each model entry is (symbol :id "model.id" :capabilities (...) ...)
+Each model entry is (symbol :id \"model.id\" :capabilities (...) ...)
 where the :id value is the actual model ID used by AWS Bedrock.")
 
 (defcustom gptel-bedrock-custom-models nil
   "User-defined Bedrock models with properties.
-Each entry should be (model-symbol :id "model.id" :capabilities (...))
+Each entry should be (model-symbol :id \"model.id\" :capabilities (...))
 User definitions override built-in models with the same symbol."
   :type '(repeat sexp)
   :group 'gptel)
@@ -675,37 +675,37 @@ This is populated automatically and not meant to be set directly by users.
 To use these models permanently, add them to `gptel-bedrock-custom-models`.")
 
 (defun gptel-bedrock-discover-models (region)
-  "Discover available models in REGION and store them in `gptel-bedrock-discovered-models`.
-This does not modify user configuration values."
+  "Discover available models in REGION and store them in `gptel-bedrock-discovered-models`."
   (interactive "sAWS Region: ")
   (message "Discovering Bedrock models...")
   ;; AWS discovery code implementation
   (let ((discovered-models nil)
-        (bedrock-url (format "https://bedrock-runtime.%s.amazonaws.com/model/list-inference-profiles" region)))
+        (bedrock-url (format "https://bedrock.%s.amazonaws.com/model/list-inference-profiles" region)))
     
     ;; For now, simulate the discovery with shell command to AWS CLI if available
     (with-temp-buffer
       (when (zerop (call-process "aws" nil t nil 
-                                "bedrock-runtime" "list-foundation-models" 
-                                "--region" region 2>/dev/null))
+                                 "bedrock" "list-foundation-models" 
+                                 "--region" region))
         (goto-char (point-min))
         (condition-case nil
-            (let* ((json-object-type 'plist)
+            (let* ((json-object-type 'alist)
                    (json-data (json-read))
-                   (models (plist-get json-data :modelSummaries)))
-              (dolist (model models)
-                (let* ((model-id (plist-get model :modelId))
-                       (model-name (plist-get model :modelName))
-                       (provider (plist-get model :providerName))
+                   (models (alist-get 'modelSummaries json-data)))
+              (dotimes (i (length models))
+                (let* ((model (aref models i))
+                       (model-id (alist-get 'modelId model))
+                       (model-name (alist-get 'modelName model))
+                       (provider (alist-get 'providerName model))
                        (sym-name (gptel-bedrock--infer-symbolic-name model-id)))
                   (push (list sym-name 
-                               :id model-id
-                               :name model-name
-                               :provider provider
-                               :capabilities (gptel-bedrock--infer-capabilities model-id))
+                              :id model-id
+                              :name model-name
+                              :provider provider
+                              :capabilities (gptel-bedrock--infer-capabilities model-id))
                         discovered-models))))
           (error nil))))
-                              
+
     (setq gptel-bedrock-discovered-models discovered-models)
     
     ;; Display summary to user
@@ -793,9 +793,9 @@ Returns nil if no matching symbol is found."
          (provider (nth 0 parts))
          (model-name (nth 1 parts)))
     (when model-name
-      (let ((name (replace-regexp-in-string "-v[0-9]+:[0-9]+$" "" model-name))
-            (name (replace-regexp-in-string "_" "-" name)))
-        (intern (downcase (concat provider "-" name))))))
+      (let* ((name (replace-regexp-in-string "-v[0-9]+:[0-9]+$" "" model-name))
+             (name (replace-regexp-in-string "_" "-" name)))
+        (intern (downcase (concat provider "-" name)))))))
 
 (defun gptel-bedrock--curl-args (region &optional profile)
   "Generate the curl arguments to get a bedrock request signed for use in REGION.
