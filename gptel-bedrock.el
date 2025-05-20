@@ -680,29 +680,42 @@ To use these models permanently, add them to `gptel-bedrock-custom-models`.")
   (message "Discovering Bedrock models...")
   ;; AWS discovery code implementation
   (let ((discovered-models nil)
-        (bedrock-url (format "https://bedrock.%s.amazonaws.com/model/list-inference-profiles" region)))
-    
-    ;; For now, simulate the discovery with shell command to AWS CLI if available
+        (bedrock-url (format "https://bedrock.%s.amazonaws.com/foundation-models" region)))
     (with-temp-buffer
-      (when (zerop (call-process "aws" nil t nil 
-                                 "bedrock" "list-foundation-models" 
-                                 "--region" region))
+      (when (zerop (apply #'call-process
+                          (nconc (list "curl" nil t nil "--silent")
+                                 (gptel-bedrock--curl-args region)
+                                 (list bedrock-url))))
         (goto-char (point-min))
         (condition-case nil
-            (let* ((json-object-type 'alist)
+            (let* ((json-object-type 'plist)
                    (json-data (json-read))
-                   (models (alist-get 'modelSummaries json-data)))
+                   (models (plist-get json-data :modelSummaries)))
               (dotimes (i (length models))
                 (let* ((model (aref models i))
-                       (model-id (alist-get 'modelId model))
-                       (model-name (alist-get 'modelName model))
-                       (provider (alist-get 'providerName model))
+                       (model-arn (plist-get model :modelArn))
+                       (model-id (plist-get model :modelId))
+                       (model-name (plist-get model :modelName))
+                       (provider (plist-get model :providerName))
+                       (input-modalities (plist-get model :inputModalities))
+                       (output-modalities (plist-get model :outputModalities))
+                       (streaming (plist-get model :responseStreamingSupported))
+                       (customizations (plist-get model :customizationsSupported))
+                       (inference-types (plist-get model :inferenceTypesSupported))
+                       (model-lifecycle (plist-get model :modelLifecycle))
                        (sym-name (gptel-bedrock--infer-symbolic-name model-id)))
                   (push (list sym-name 
+                              :arn model-arn
                               :id model-id
                               :name model-name
                               :provider provider
-                              :capabilities (gptel-bedrock--infer-capabilities model-id))
+                              :input-modalities input-modalities
+                              :output-modalities output-modalities
+                              :streaming streaming
+                              :inference-types inference-types
+                              :model-lifecycle model-lifecycle
+                              :capabilities (gptel-bedrock--infer-capabilities model-id)
+                              )
                         discovered-models))))
           (error nil))))
 
@@ -715,7 +728,7 @@ To use these models permanently, add them to `gptel-bedrock-custom-models`.")
       (message "No models found. Make sure AWS CLI is configured correctly."))
     gptel-bedrock-discovered-models))
 
-(defun gptel-bedrock--infer-capabilities (model-id)
+(defun gptel-bedrock--infer-capabilities (model-id input-types)
   "Infer model capabilities from MODEL-ID."
   (cond
    ((string-match "anthropic\\.claude" model-id)
