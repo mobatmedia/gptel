@@ -68,16 +68,16 @@
   "Parse TOOLS and return a list of ToolSpecification objects.
 
 TOOLS is a list of `gptel-tool' structs, which see."
-  ;; https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ToolSpecification.html
-  (vconcat
-   (mapcar
-    (lambda (tool)
-      (list :toolSpec
-            (list
-             :name (gptel-tool-name tool)
-             :description (gptel-tool-description tool)
-             :inputSchema (list :json (gptel--tool-args-to-json-schema (gptel-tool-args tool))))))
-    (ensure-list tools))))
+   ;; https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ToolSpecification.html
+   (let ((default-outputs (cl-call-next-method))) ;; use openai tool-parse
+     (map 'vector
+      (lambda (tool spec)
+        (list :toolSpec
+              (list
+               :name (gptel-tool-name tool)
+               :description (gptel-tool-description tool)
+               :inputSchema (list :json (plist-get (plist-get spec :function) :parameters)))))
+      (ensure-list tools) default-outputs)))
 
 (cl-defmethod gptel--parse-response ((_backend gptel-bedrock) response info)
   "Parse a Bedrock (non-streaming) RESPONSE and return response text.
