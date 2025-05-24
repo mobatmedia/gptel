@@ -608,6 +608,7 @@ Keyword arguments:
 REGION - AWS region name (e.g. \"us-east-1\")
 MODELS - The list of models supported by this backend
 MODEL-REGION - one of {'apac 'eu 'us} or nil
+CURL-ARGS - additional curl args
 STREAM - Whether to use streaming responses or not."
   (declare (indent 1))
   (unless (and gptel-use-curl (version<= "8.5" (gptel-bedrock--curl-version)))
