@@ -810,10 +810,8 @@ Returns nil if no matching symbol is found."
              (name (replace-regexp-in-string "_" "-" name)))
         (intern (downcase (concat provider "-" name)))))))
 
-(defun gptel-bedrock--curl-args (region &optional profile)
-  "Generate the curl arguments to get a bedrock request signed for use in REGION.
-
-Optional PROFILE specifies the AWS credential profile to use."
+(defun gptel-bedrock--curl-args (region)
+  "Generate the curl arguments to get a bedrock request signed for use in REGION."
   ;; https://curl.se/docs/manpage.html#--aws-sigv4
   (cl-multiple-value-bind (key-id secret token) (gptel-bedrock--get-credentials)
     (nconc
@@ -821,7 +819,7 @@ Optional PROFILE specifies the AWS credential profile to use."
       "--user" (format "%s:%s" key-id secret)
       "--aws-sigv4" (format "aws:amz:%s:bedrock" region))
      (unless (memq system-type '(windows-nt ms-dos))
-       (list "--output" "/dev/stdout")) ;; Without this curl swallows the output
+       (list "--output" "/dev/stdout")) ;; Linux: Without this curl swallows the output
      (when token
        (list (format "-Hx-amz-security-token: %s" token))))))
 
