@@ -532,12 +532,12 @@ Convenient to use with `cl-multiple-value-bind'"
 
 (defvar gptel-bedrock-model-ids
   ;; https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html
-  '((claude-3-5-sonnet-20241022  . "anthropic.claude-3-5-sonnet-20241022-v2:0")
-    (claude-3-5-sonnet-20240620  . "anthropic.claude-3-5-sonnet-20240620-v1:0")
-    (claude-3-5-haiku-20241022   . "anthropic.claude-3-5-haiku-20241022-v1:0")
-    (claude-3-opus-20240229      . "anthropic.claude-3-opus-20240229-v1:0")
-    (claude-3-sonnet-20240229    . "anthropic.claude-3-sonnet-20240229-v1:0")
-    (claude-3-haiku-20240307     . "anthropic.claude-3-haiku-20240307-v1:0")
+  '((claude-3-5-sonnet-20241022  . "us.anthropic.claude-3-5-sonnet-20241022-v2:0")
+    (claude-3-5-sonnet-20240620  . "us.anthropic.claude-3-5-sonnet-20240620-v1:0")
+    (claude-3-5-haiku-20241022   . "us.anthropic.claude-3-5-haiku-20241022-v1:0")
+    (claude-3-opus-20240229      . "us.anthropic.claude-3-opus-20240229-v1:0")
+    (claude-3-sonnet-20240229    . "us.anthropic.claude-3-sonnet-20240229-v1:0")
+    (claude-3-haiku-20240307     . "us.anthropic.claude-3-haiku-20240307-v1:0")
     (mistral-7b                  . "mistral.mistral-7b-instruct-v0:2")
     (mistral-8x7b                . "mistral.mixtral-8x7b-instruct-v0:1")
     (mistral-large-2402          . "mistral.mistral-large-2402-v1:0")
@@ -581,8 +581,9 @@ IDs can be added or replaced by calling
     (nconc
      (list
       "--user" (format "%s:%s" key-id secret)
-      "--aws-sigv4" (format "aws:amz:%s:bedrock" region)
-      "--output" "/dev/stdout") ;; Without this curl swallows the output
+      "--aws-sigv4" (format "aws:amz:%s:bedrock" region))
+     (unless (memq system-type '(windows-nt ms-dos))
+       (list "--output" "/dev/stdout")) ;; Linux: Without this curl swallows the output
      (when token
        (list (format "-Hx-amz-security-token: %s" token))))))
 
