@@ -33,12 +33,8 @@
 
 (cl-defstruct (gptel-bedrock (:constructor gptel--make-bedrock)
                              (:copier nil)
-<<<<<<< HEAD
-                             (:include gptel-backend)))
-=======
                              (:include gptel-backend))
 	      model-region)
->>>>>>> akssri/akssri/bedrock-fix-1
 
 (defconst gptel-bedrock--prompt-type
   ;; For documentation purposes only -- this describes the type of prompt objects that get passed
