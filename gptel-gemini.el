@@ -228,32 +228,32 @@ See generic implementation for full documentation."
     (plist-put data :contents (vconcat prompts (list new-prompt)))))
 
 (cl-defmethod gptel--parse-list ((backend gptel-gemini) prompt-list)
-  (if (stringp (car prompt-list))
-      (cl-loop for text in prompt-list  ; Simple format, list of strings
-               for role = t then (not role)
-               if text
-               if role
-               collect (list :role "user" :parts `[(:text ,text)]) into prompts
-               else collect (list :role "model" :parts `(:text ,text)) into prompts
-               finally return prompts)
-    (let ((full-prompt))                ; Advanced format, list of lists
-      (dolist (entry prompt-list)
-        (pcase entry
-          (`(prompt . ,msg)
-           (push (list :role "user"
-                       :parts `[(:text ,(or (car-safe msg) msg))])
-                 full-prompt))
-          (`(response . ,msg)
-           (push (list :role "model"
-                       :parts `[(:text ,(or (car-safe msg) msg))])
-                 full-prompt))
-          (`(tool . ,call)
-           (push (list :role "model"
-                       :parts (vector `(:functionCall ( :name ,(plist-get call :name)
-                                                        :args ,(plist-get call :args)))))
-                 full-prompt)
-           (push (gptel--parse-tool-results backend (list (cdr entry))) full-prompt))))
-      (nreverse full-prompt))))
+  (if (consp (car prompt-list))
+      (let ((full-prompt))              ; Advanced format, list of lists
+        (dolist (entry prompt-list)
+          (pcase entry
+            (`(prompt . ,msg)
+             (push (list :role "user"
+                         :parts `[(:text ,(or (car-safe msg) msg))])
+                   full-prompt))
+            (`(response . ,msg)
+             (push (list :role "model"
+                         :parts `[(:text ,(or (car-safe msg) msg))])
+                   full-prompt))
+            (`(tool . ,call)
+             (push (list :role "model"
+                         :parts (vector `(:functionCall ( :name ,(plist-get call :name)
+                                                          :args ,(plist-get call :args)))))
+                   full-prompt)
+             (push (gptel--parse-tool-results backend (list (cdr entry))) full-prompt))))
+        (nreverse full-prompt))
+    (cl-loop for text in prompt-list    ; Simple format, list of strings
+             for role = t then (not role)
+             if text
+             if role
+             collect (list :role "user" :parts `[(:text ,text)]) into prompts
+             else collect (list :role "model" :parts `(:text ,text)) into prompts
+             finally return prompts)))
 
 (cl-defmethod gptel--parse-buffer ((backend gptel-gemini) &optional max-entries)
   (let ((prompts) (prev-pt (point))
@@ -460,6 +460,15 @@ files in the context."
      :mime-types ("image/png" "image/jpeg" "image/webp" "image/heic" "image/heif"
                   "application/pdf" "text/plain" "text/csv" "text/html")
      :context-window 1000
+     :input-cost 0.15
+     :output-cost 0.60 ; 3.50 for thinking
+     :cutoff-date "2025-01")
+    (gemini-2.5-flash-preview-05-20
+     :description "Best Gemini model in terms of price-performance, offering well-rounded capabilities"
+     :capabilities (tool-use json media)
+     :mime-types ("image/png" "image/jpeg" "image/webp" "image/heic" "image/heif"
+                  "application/pdf" "text/plain" "text/csv" "text/html")
+     :context-window 1048 ; 65536 output token limit
      :input-cost 0.15
      :output-cost 0.60 ; 3.50 for thinking
      :cutoff-date "2025-01")

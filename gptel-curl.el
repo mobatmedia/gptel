@@ -55,9 +55,9 @@ See `gptel-backend'."
 (defconst gptel-curl--common-args
   (if (memq system-type '(windows-nt ms-dos))
       '("--disable" "--location" "--silent" "-XPOST"
-        "-y300" "-Y1" "-D-")
+        "-y7200" "-Y1" "-D-")
     '("--disable" "--location" "--silent" "--compressed"
-      "-XPOST" "-y300" "-Y1" "-D-"))
+      "-XPOST" "-y7200" "-Y1" "-D-"))
   "Arguments always passed to Curl for gptel queries.")
 
 (defun gptel-curl--get-args (info token)
@@ -90,7 +90,7 @@ REQUEST-DATA is the data to send, TOKEN is a unique identifier."
     (append
      gptel-curl--common-args
      gptel-curl-extra-args
-     (let ((curl-args (gptel-backend-curl-args gptel-backend)))
+     (and-let* ((curl-args (gptel-backend-curl-args gptel-backend)))
        (if (functionp curl-args) (funcall curl-args) curl-args))
      (list (format "-w(%s . %%{size_header})" token))
      (if (length< data-json gptel-curl-file-size-threshold)
@@ -138,13 +138,9 @@ the response is inserted into the current buffer after point."
          (args (gptel-curl--get-args info token))
          (stream (plist-get info :stream))
          (process (apply #'start-process "gptel-curl"
-                         (gptel--temp-buffer " *gptel-curl*") "curl" args)))
-    ;; Don't try to convert cr-lf to cr on Windows so that curl's "header size
-    ;; in bytes" stays correct. Explicitly set utf-8 for non-win systems too,
-    ;; for cases when buffer coding system is not set to utf-8.
-    (set-process-coding-system process 'utf-8-unix 'utf-8-unix)
+                         (gptel--temp-buffer " *gptel-curl*") (gptel--curl-path) args)))
     (when (eq gptel-log-level 'debug)
-      (gptel--log (mapconcat #'shell-quote-argument (cons (gptel-curl-path) args) " \\\n")
+      (gptel--log (mapconcat #'shell-quote-argument (cons (gptel--curl-path) args) " \\\n")
                   "request Curl command" 'no-json))
 
     (with-current-buffer (process-buffer process)
@@ -153,11 +149,11 @@ the response is inserted into the current buffer after point."
         ;; set-buffer-file-coding-system is not needed since we don't save this buffer
         (set-buffer-multibyte nil)
         (set-process-coding-system process 'binary 'binary))
-       ((memq system-type '(windows-nt ms-dos))
-        ;; Don't try to convert cr-lf to cr on Windows so that curl's "header size
-        ;; in bytes" stays correct
-        (set-process-coding-system process 'utf-8-unix 'utf-8-unix)))
-
+       (t
+	;; Don't try to convert cr-lf to cr on Windows so that curl's "header size
+	;; in bytes" stays correct. Explicitly set utf-8 for non-win systems too,
+	;; for cases when buffer coding system is not set to utf-8.
+	(set-process-coding-system process 'utf-8-unix 'utf-8-unix)))
       (set-process-query-on-exit-flag process nil)
       (if (plist-get info :token)       ;not the first run, set only the token
           (plist-put info :token token)
