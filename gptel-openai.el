@@ -261,7 +261,8 @@ Mutate state INFO with response metadata."
     ;; OpenAI returns either non-blank text content or a tool call, not both.
     ;; However OpenAI-compatible APIs like llama.cpp can include both (#819), so
     ;; we check for both tool calls and responses independently.
-    (when-let* ((tool-calls (plist-get message :tool_calls)))
+    (when-let* ((tool-calls (plist-get message :tool_calls))
+                ((not (eq tool-calls :null))))
       (gptel--inject-prompt        ; First add the tool call to the prompts list
        (plist-get info :backend) (plist-get info :data) message)
       (cl-loop             ;Then capture the tool call data for running the tool
@@ -351,33 +352,33 @@ If the ID has the format used by a different backend, use as-is."
 ;; is handled by its defgeneric implementation
 
 (cl-defmethod gptel--parse-list ((backend gptel-openai) prompt-list)
-  (if (stringp (car prompt-list))
-      (cl-loop for text in prompt-list  ; Simple format, list of strings
-               for role = t then (not role)
-               if text collect
-               (list :role (if role "user" "assistant") :content text))
-    (let ((full-prompt))                ; Advanced format, list of lists
-      (dolist (entry prompt-list)
-        (pcase entry
-          (`(prompt . ,msg)
-           (push (list :role "user" :content (or (car-safe msg) msg)) full-prompt))
-          (`(response . ,msg)
-           (push (list :role "assistant" :content (or (car-safe msg) msg)) full-prompt))
-          (`(tool . ,call)
-           (unless (plist-get call :id)
-             (plist-put call :id (gptel--openai-format-tool-id nil)))
-           (push
-            (list
-             :role "assistant"
-             :tool_calls
-             (vector
-              (list :type "function"
-                    :id (plist-get call :id)
-                    :function `( :name ,(plist-get call :name)
-                                 :arguments ,(gptel--json-encode (plist-get call :args))))))
-            full-prompt)
-           (push (car (gptel--parse-tool-results backend (list (cdr entry)))) full-prompt))))
-      (nreverse full-prompt))))
+  (if (consp (car prompt-list))
+      (let ((full-prompt))              ; Advanced format, list of lists
+        (dolist (entry prompt-list)
+          (pcase entry
+            (`(prompt . ,msg)
+             (push (list :role "user" :content (or (car-safe msg) msg)) full-prompt))
+            (`(response . ,msg)
+             (push (list :role "assistant" :content (or (car-safe msg) msg)) full-prompt))
+            (`(tool . ,call)
+             (unless (plist-get call :id)
+               (plist-put call :id (gptel--openai-format-tool-id nil)))
+             (push
+              (list
+               :role "assistant"
+               :tool_calls
+               (vector
+                (list :type "function"
+                      :id (plist-get call :id)
+                      :function `( :name ,(plist-get call :name)
+                                   :arguments ,(gptel--json-encode (plist-get call :args))))))
+              full-prompt)
+             (push (car (gptel--parse-tool-results backend (list (cdr entry)))) full-prompt))))
+        (nreverse full-prompt))
+    (cl-loop for text in prompt-list    ; Simple format, list of strings
+             for role = t then (not role)
+             if text collect
+             (list :role (if role "user" "assistant") :content text))))
 
 (cl-defmethod gptel--parse-buffer ((backend gptel-openai) &optional max-entries)
   (let ((prompts) (prev-pt (point))
@@ -521,7 +522,7 @@ information, in the form
  (model-name . plist)
 
 For a list of currently recognized plist keys, see
-`gptel--openai-models'. An example of a model specification
+`gptel--openai-models'.  An example of a model specification
 including both kinds of specs:
 
 :models
@@ -689,3 +690,7 @@ Example:
 
 (provide 'gptel-openai)
 ;;; gptel-openai.el ends here
+
+;; Local Variables:
+;; byte-compile-warnings: (not docstrings)
+;; End:

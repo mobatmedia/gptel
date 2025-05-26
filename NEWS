@@ -7,20 +7,6 @@
 - ~gptel-org-branching-context~ is now a global variable.  It was
   buffer-local by default in past releases.
 
-- ~gptel-bedrock-model-ids~ has been replaced by a more robust model handling system. 
-  The new system provides model properties and supports direct model ID specification.
-  To migrate:
-  - If you were using built-in models, no changes needed
-  - If you added custom models, add them to ~gptel-bedrock-custom-models~ instead:
-    #+begin_src emacs-lisp
-    (setq gptel-bedrock-custom-models
-          '((my-custom-model 
-             :id "your.model-id-here-v1:0"
-             :capabilities (media tool-use)
-             :description "My custom model")))
-    #+end_src
-  - Use the new ~gptel-bedrock-discover-models~ to discover available models
-
 - The following models have been removed from the default ChatGPT backend:
   - ~o1-preview~: use ~o1~ instead.
   - ~gpt-4-turbo-preview~: use ~gpt-4o~ or ~gpt-4-turbo~ instead.
@@ -52,6 +38,15 @@
   backend.
 
 - Tools now run in the buffer from which the request originates.
+
+- You can now define "presets", which are a bundle of gptel options, such as the
+  backend, model, system message, included tools, temperature and so on.  This
+  set of options can be applied together, making it easy to switch between
+  different tasks using gptel.  From gptel's transient menu, you can save the
+  current configuration as a preset or apply another one.  Presets can be
+  applied globally, buffer-locally or for the next request only.  To persist
+  presets across Emacs sessions, define presets in your configuration
+  using ~gptel-make-preset~.
 
 ** Notable Bug fixes
 
