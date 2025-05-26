@@ -33,7 +33,8 @@
 
 (cl-defstruct (gptel-bedrock (:constructor gptel--make-bedrock)
                              (:copier nil)
-                             (:include gptel-backend)))
+                             (:include gptel-backend))
+	      model-region)
 
 (defconst gptel-bedrock--prompt-type
   ;; For documentation purposes only -- this describes the type of prompt objects that get passed
@@ -54,65 +55,30 @@
                                             ;; ToolResultContentBlock, but we only send text results
                                             :content (array (plist :text string))))))))
 
-(defun gptel-bedrock--guardrails-config (guardrails-id &optional version)
-  "Create a guardrails configuration for AWS Bedrock.
-GUARDRAILS-ID is the ID or ARN of the guardrail.
-Optional VERSION is the guardrail version."
-  `(:guardrailConfig
-    (:guardrailId ,guardrails-id
-                  ,@(when version `(:guardrailVersion ,version)))))
-
 (cl-defmethod gptel--request-data ((backend gptel-bedrock) prompts)
   "Prepare request data for AWS Bedrock in converse format from PROMPTS."
-  (let ((req-params (gptel-backend-request-params backend)))
-    (nconc
-     `(:messages [,@prompts] :inferenceConfig (:maxTokens ,(or gptel-max-tokens 500)))
-     (when gptel--system-message `(:system [(:text ,gptel--system-message)]))
-     (when gptel-temperature `(:temperature ,gptel-temperature))
-     
-     ;; Add support for additional inference parameters
-     (when-let ((top-p (plist-get req-params :topP)))
-       `(:topP ,top-p))
-     (when-let ((top-k (plist-get req-params :topK)))
-       `(:topK ,top-k))
-     
-     ;; Add support for performanceConfig
-     (when-let ((perf-config (plist-get req-params :performanceConfig)))
-       `(:performanceConfig ,perf-config))
-     
-     ;; Add support for guardrails
-     (when-let ((guardrails-id (plist-get req-params :guardrailId)))
-       (gptel-bedrock--guardrails-config guardrails-id
-                                         (plist-get req-params :guardrailVersion)))
-     
-     ;; Add cache support
-     (when gptel-cache
-       (let ((cache-config
-              (cond ((eq gptel-cache t) '(:messages t :system t))
-                    ((listp gptel-cache) `(,@(when (memq 'message gptel-cache) '(:messages t))
-                                            ,@(when (memq 'system gptel-cache) '(:system t))))
-                    (t nil))))
-         (when cache-config `(:caching ,cache-config))))
-     
-     ;; Tool support
-     (when (and gptel-use-tools gptel-tools)
-       `(:toolConfig (:toolChoice ,(if (eq gptel-use-tools 'force) '(:any '()) '(:auto '()))
-                      :tools ,(gptel--parse-tools backend gptel-tools)))))))
+  (nconc
+   `(:messages [,@prompts] :inferenceConfig (:maxTokens ,(or gptel-max-tokens 500)))
+   (when gptel--system-message `(:system [(:text ,gptel--system-message)]))
+   (when gptel-temperature `(:temperature ,gptel-temperature))
+   (when (and gptel-use-tools gptel-tools)
+     `(:toolConfig (:toolChoice ,(if (eq gptel-use-tools 'force) '(:any '()) '(:auto '()))
+                    :tools ,(gptel--parse-tools backend gptel-tools))))))
 
 (cl-defmethod gptel--parse-tools ((_backend gptel-bedrock) tools)
   "Parse TOOLS and return a list of ToolSpecification objects.
 
 TOOLS is a list of `gptel-tool' structs, which see."
-  ;; https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ToolSpecification.html
-  (vconcat
-   (mapcar
-    (lambda (tool)
-      (list :toolSpec
-            (list
-             :name (gptel-tool-name tool)
-             :description (gptel-tool-description tool)
-             :inputSchema (list :json (gptel--tool-args-to-json-schema (gptel-tool-args tool))))))
-    (ensure-list tools))))
+   ;; https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ToolSpecification.html
+   (let ((default-outputs (cl-call-next-method))) ;; use openai tool-parse
+     (map 'vector
+      (lambda (tool spec)
+        (list :toolSpec
+              (list
+               :name (gptel-tool-name tool)
+               :description (gptel-tool-description tool)
+               :inputSchema (list :json (plist-get (plist-get spec :function) :parameters)))))
+      (ensure-list tools) default-outputs)))
 
 (cl-defmethod gptel--parse-response ((_backend gptel-bedrock) response info)
   "Parse a Bedrock (non-streaming) RESPONSE and return response text.
@@ -512,6 +478,41 @@ conversation."
                       :content [(:text ,(plist-get tool-call :result))])))
      tool-use-requests))))
 
+(defvar gptel-bedrock--aws-profile-cache nil
+  "Cache for AWS profile credentials in the form of (PROFILE . CREDS).")
+
+(defmacro gptel-bedrock--alist-get! (key alist &optional default force-updatep testfn)
+  (let ((key-sym (gensym "key")))
+    (gv-letplace (getter setter) alist
+      `(let ((,key-sym ,key))
+	 (or (and (not ,force-updatep) (cdr (assoc ,key-sym ,getter ,@(if testfn `(,testfn)))))
+	     ,@(when default
+		 `((let ((new-val ,default))
+		     ,(funcall setter `(cons (cons ,key-sym new-val) ,getter))
+		     new-val))))))))
+
+(defun gptel-bedrock--fetch-aws-profile-credentials (profile &optional clear-cachep)
+  "Fetch & cache AWS credentials for PROFILE using aws-cli."
+  (let* ((creds-json
+	   (gptel-bedrock--alist-get! profile gptel-bedrock--aws-profile-cache
+	      (with-temp-buffer
+		  (unless (zerop (call-process "aws" nil t nil "configure" "export-credentials"
+					       (format "--profile=%s" profile)))
+		    (user-error "Failed to get AWS credentials from profile"))
+		(json-parse-string (buffer-string)))
+	      clear-cachep #'string=))
+	 (expiration (if-let (exp (gethash "Expiration" creds-json))
+			     (date-to-time exp))))
+    (cond
+      ((time-less-p (current-time) expiration)
+       (let ((access-key (gethash "AccessKeyId" creds-json))
+	     (secret-key (gethash "SecretAccessKey" creds-json))
+	     (session-token (gethash "SessionToken" creds-json)))
+	 (cl-values access-key secret-key session-token)))
+      ((not clear-cachep)
+       (gptel-bedrock--fetch-aws-profile-credentials profile t))
+      (t (user-error "AWS credentials expired for profile: %s" profile)))))
+
 (defun gptel-bedrock--get-credentials ()
   "Return the AWS credentials to use for the request.
 
@@ -520,295 +521,58 @@ token is needed, with this form: (AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 AWS_SESSION_TOKEN).
 
 Convenient to use with `cl-multiple-value-bind'"
-  (cond
-   ;; Try environment variables first
-   ((and (getenv "AWS_ACCESS_KEY_ID") (getenv "AWS_SECRET_ACCESS_KEY"))
-    (let ((key-id (getenv "AWS_ACCESS_KEY_ID"))
-          (secret-key (getenv "AWS_SECRET_ACCESS_KEY"))
-          (token (getenv "AWS_SESSION_TOKEN")))
-      (if token
-          (cl-values key-id secret-key token)
-        (cl-values key-id secret-key))))
-   ;; Try credential file
-   ((file-exists-p (expand-file-name "~/.aws/credentials"))
-    (with-temp-buffer
-      (insert-file-contents (expand-file-name "~/.aws/credentials"))
-      (let ((key-id nil) (secret-key nil) (token nil)
-            (profile "default")) ;; Use default profile
-        (goto-char (point-min))
-        ;; Find profile section
-        (when (re-search-forward (format "\\[%s\\]" profile) nil t)
-          ;; Extract credentials
-          (when (re-search-forward "aws_access_key_id\s-*=\s-*\\(.+\\)" nil t)
-            (setq key-id (string-trim (match-string 1))))
-          (when (re-search-forward "aws_secret_access_key\s-*=\s-*\\(.+\\)" nil t)
-            (setq secret-key (string-trim (match-string 1))))
-          (goto-char (point-min))
-          (when (and (re-search-forward (format "\\[%s\\]" profile) nil t)
-                     (re-search-forward "aws_session_token\s-*=\s-*\\(.+\\)" nil t))
-            (setq token (string-trim (match-string 1)))))
-        (if (and key-id secret-key)
-            (if token
-                (cl-values key-id secret-key token)
-              (cl-values key-id secret-key))
-          (user-error "Could not find valid credentials in ~/.aws/credentials")))))
-   ;; Try AWS auth source if available
-   ((fboundp 'auth-source-search)
-    (when-let* ((auth-entry (auth-source-search :host "aws" :user "bedrock" :require '(:secret) :max 1))
-                (secret-fn (plist-get (car auth-entry) :secret)))
-      (let ((secret (if (functionp secret-fn) (funcall secret-fn) secret-fn)))
-        (if (stringp secret)
-            ;; Expect format "KEY_ID:SECRET[:TOKEN]"
-            (let ((parts (split-string secret ":")))
-              (pcase (length parts)
-                (2 (cl-values (nth 0 parts) (nth 1 parts)))
-                (3 (cl-values (nth 0 parts) (nth 1 parts) (nth 2 parts)))
-                (_ (user-error "Invalid AWS credential format in auth source"))))
-          (user-error "Could not retrieve AWS credentials from auth source")))))
-   ;; No valid credentials found
-   (t (user-error "Missing AWS credentials; tried environment variables, ~/.aws/credentials, and auth-source"))))
+  (let ((key-id (getenv "AWS_ACCESS_KEY_ID"))
+        (secret-key (getenv "AWS_SECRET_ACCESS_KEY"))
+        (token (getenv "AWS_SESSION_TOKEN"))
+	(profile (getenv "AWS_PROFILE")))
+    (cond
+      ((and key-id secret-key) (cl-values key-id secret-key token))
+      ((and profile) (gptel-bedrock--fetch-aws-profile-credentials profile))
+      (t (user-error "Missing AWS credentials; currently only environment variables are supported")))))
 
-;; Model handling for Bedrock
-
-;; For backward compatibility
 (defvar gptel-bedrock-model-ids
-  (with-temp-message ""
-    (message "Warning: gptel-bedrock-model-ids is deprecated. See NEWS for migration info.")
-    '((claude-3-opus-20240229 . "us.anthropic.claude-3-opus-20240229-v1:0")))
-  "Deprecated. Use `gptel-bedrock-custom-models' instead.")
+  ;; https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html
+  '((claude-3-5-sonnet-20241022  . "us.anthropic.claude-3-5-sonnet-20241022-v2:0")
+    (claude-3-5-sonnet-20240620  . "us.anthropic.claude-3-5-sonnet-20240620-v1:0")
+    (claude-3-5-haiku-20241022   . "us.anthropic.claude-3-5-haiku-20241022-v1:0")
+    (claude-3-opus-20240229      . "us.anthropic.claude-3-opus-20240229-v1:0")
+    (claude-3-sonnet-20240229    . "us.anthropic.claude-3-sonnet-20240229-v1:0")
+    (claude-3-haiku-20240307     . "us.anthropic.claude-3-haiku-20240307-v1:0")
+    (mistral-7b                  . "mistral.mistral-7b-instruct-v0:2")
+    (mistral-8x7b                . "mistral.mixtral-8x7b-instruct-v0:1")
+    (mistral-large-2402          . "mistral.mistral-large-2402-v1:0")
+    (mistral-large-2407          . "mistral.mistral-large-2407-v1:0")
+    (mistral-small-2402          . "mistral.mistral-small-2402-v1:0")
+    (llama-3-8b                  . "meta.llama3-8b-instruct-v1:0")
+    (llama-3-70b                 . "meta.llama3-70b-instruct-v1:0")
+    (llama-3-1-8b                . "meta.llama3-1-8b-instruct-v1:0")
+    (llama-3-1-70b               . "meta.llama3-1-70b-instruct-v1:0")
+    (llama-3-1-405b              . "meta.llama3-1-405b-instruct-v1:0")
+    (llama-3-2-1b                . "meta.llama3-2-1b-instruct-v1:0")
+    (llama-3-2-3b                . "meta.llama3-2-3b-instruct-v1:0")
+    (llama-3-2-11b               . "meta.llama3-2-11b-instruct-v1:0")
+    (llama-3-2-90b               . "meta.llama3-2-90b-instruct-v1:0")
+    (llama-3-3-70b               . "meta.llama3-3-70b-instruct-v1:0"))
+  "Map of model name to bedrock id.
+
+IDs can be added or replaced by calling
+\(push (model-name . \"model-id\") gptel-bedrock-model-ids).")
 
 (defvar gptel--bedrock-models
-  ;; https://docs.aws.amazon.com/bedrock/latest/userguide/models-supported.html
-  '((claude-3-7-sonnet-20250219
-     :id "us.anthropic.claude-3-7-sonnet-20250219-v1:0"
-     :capabilities (media tool-use json url reasoning)
-     :mime-types ("image/jpeg" "image/png" "image/gif" "image/webp")
-     :context-window 128
-     :description "Anthropic's Claude 3.7 Sonnet model")
-    (claude-3-5-sonnet-20241022
-     :id "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
-     :capabilities (media tool-use json url)
-     :mime-types ("image/jpeg" "image/png" "image/gif" "image/webp")
-     :context-window 128
-     :description "Anthropic's Claude 3.5 Sonnet model")
-    (claude-3-5-sonnet-20240620
-     :id "us.anthropic.claude-3-5-sonnet-20240620-v1:0"
-     :capabilities (media tool-use json url)
-     :mime-types ("image/jpeg" "image/png" "image/gif" "image/webp")
-     :context-window 128
-     :description "Anthropic's Claude 3.5 Sonnet model")
-    (claude-3-5-haiku-20241022
-     :id "us.anthropic.claude-3-5-haiku-20241022-v1:0"
-     :capabilities (media tool-use json url)
-     :mime-types ("image/jpeg" "image/png" "image/gif" "image/webp")
-     :context-window 128
-     :description "Anthropic's Claude 3.5 Haiku model")
-    (claude-3-opus-20240229
-     :id "us.anthropic.claude-3-opus-20240229-v1:0"
-     :capabilities (media tool-use json url)
-     :mime-types ("image/jpeg" "image/png" "image/gif" "image/webp")
-     :context-window 128
-     :description "Anthropic's Claude 3 Opus model")
-    (claude-3-sonnet-20240229
-     :id "us.anthropic.claude-3-sonnet-20240229-v1:0"
-     :capabilities (media tool-use json url)
-     :mime-types ("image/jpeg" "image/png" "image/gif" "image/webp")
-     :context-window 128
-     :description "Anthropic's Claude 3 Sonnet model")
-    (claude-3-haiku-20240307
-     :id "us.anthropic.claude-3-haiku-20240307-v1:0"
-     :capabilities (media tool-use json url)
-     :mime-types ("image/jpeg" "image/png" "image/gif" "image/webp")
-     :context-window 128
-     :description "Anthropic's Claude 3 Haiku model")
-    (mistral-7b
-     :id "mistral.mistral-7b-instruct-v0:2"
-     :capabilities (tool-use)
-     :description "Mistral 7B Instruct model")
-    (mistral-8x7b
-     :id "mistral.mixtral-8x7b-instruct-v0:1"
-     :capabilities (tool-use)
-     :description "Mistral Mixtral 8x7B Instruct model")
-    (mistral-large-2402
-     :id "mistral.mistral-large-2402-v1:0"
-     :capabilities (tool-use)
-     :description "Mistral Large 2402 model")
-    (mistral-large-2407
-     :id "mistral.mistral-large-2407-v1:0"
-     :capabilities (tool-use)
-     :description "Mistral Large 2407 model")
-    (mistral-small-2402
-     :id "mistral.mistral-small-2402-v1:0"
-     :capabilities (tool-use)
-     :description "Mistral Small 2402 model")
-    (llama-3-8b
-     :id "meta.llama3-8b-instruct-v1:0"
-     :capabilities (tool-use)
-     :description "Meta's Llama 3 8B Instruct model")
-    (llama-3-70b
-     :id "meta.llama3-70b-instruct-v1:0"
-     :capabilities (tool-use)
-     :description "Meta's Llama 3 70B Instruct model")
-    (llama-3-1-8b
-     :id "us.meta.llama3-1-8b-instruct-v1:0"
-     :capabilities (tool-use)
-     :description "Meta's Llama 3.1 8B Instruct model")
-    (llama-3-1-70b
-     :id "us.meta.llama3-1-70b-instruct-v1:0"
-     :capabilities (tool-use)
-     :description "Meta's Llama 3.1 70B Instruct model"))
-  "Registry of known Bedrock models with their properties.
+  (let ((known-ids (mapcar #'car gptel-bedrock-model-ids)))
+    (cl-remove-if-not (lambda (model) (memq (car model) known-ids)) gptel--anthropic-models))
+  "List of available AWS Bedrock models and associated properties.")
 
-Each model entry is (symbol :id \"model.id\" :capabilities (...) ...)
-where the :id value is the actual model ID used by AWS Bedrock.")
-
-(defcustom gptel-bedrock-custom-models nil
-  "User-defined Bedrock models with properties.
-Each entry should be (model-symbol :id \"model.id\" :capabilities (...))
-User definitions override built-in models with the same symbol."
-  :type '(repeat sexp)
-  :group 'gptel)
-
-(defvar gptel-bedrock-discovered-models nil
-  "Models discovered via `gptel-bedrock-discover-models`.
-This is populated automatically and not meant to be set directly by users.
-To use these models permanently, add them to `gptel-bedrock-custom-models`.")
-
-(defun gptel-bedrock-discover-models (region)
-  "Discover available models in REGION and store them in `gptel-bedrock-discovered-models`."
-  (interactive "sAWS Region: ")
-  (message "Discovering Bedrock models...")
-  ;; AWS discovery code implementation
-  (let ((discovered-models nil)
-        (bedrock-url (format "https://bedrock.%s.amazonaws.com/foundation-models" region)))
-    (with-temp-buffer
-      (when (zerop (apply #'call-process
-                          (nconc (list "curl" nil t nil "--silent")
-                                 (gptel-bedrock--curl-args region)
-                                 (list bedrock-url))))
-        (goto-char (point-min))
-        (condition-case nil
-            (let* ((json-object-type 'plist)
-                   (json-data (json-read))
-                   (models (plist-get json-data :modelSummaries)))
-              (dotimes (i (length models))
-                (let* ((model (aref models i))
-                       (model-arn (plist-get model :modelArn))
-                       (model-id (plist-get model :modelId))
-                       (model-name (plist-get model :modelName))
-                       (provider (plist-get model :providerName))
-                       (input-modalities (plist-get model :inputModalities))
-                       (output-modalities (plist-get model :outputModalities))
-                       (streaming (plist-get model :responseStreamingSupported))
-                       (customizations (plist-get model :customizationsSupported))
-                       (inference-types (plist-get model :inferenceTypesSupported))
-                       (model-lifecycle (plist-get model :modelLifecycle))
-                       (sym-name (gptel-bedrock--infer-symbolic-name model-id)))
-                  (push (list sym-name 
-                              :arn model-arn
-                              :id model-id
-                              :name model-name
-                              :provider provider
-                              :input-modalities input-modalities
-                              :output-modalities output-modalities
-                              :streaming streaming
-                              :inference-types inference-types
-                              :model-lifecycle model-lifecycle
-                              :capabilities (gptel-bedrock--infer-capabilities model-id)
-                              )
-                        discovered-models))))
-          (error nil))))
-
-    (setq gptel-bedrock-discovered-models discovered-models)
-    
-    ;; Display summary to user
-    (if discovered-models
-        (message "Found %d models. Use M-x gptel-bedrock-show-models to see details."
-                 (length discovered-models))
-      (message "No models found. Make sure AWS CLI is configured correctly."))
-    gptel-bedrock-discovered-models))
-
-(defun gptel-bedrock--infer-capabilities (model-id input-types)
-  "Infer model capabilities from MODEL-ID."
-  (cond
-   ((string-match "anthropic\\.claude" model-id)
-    '(media tool-use json url))
-   ((string-match "mistral" model-id)
-    '(tool-use))
-   ((string-match "meta\\|llama" model-id)
-    '(tool-use))
-   (t nil)))
-
-(defun gptel-bedrock-show-models ()
-  "Display discovered models and show how to add them to configuration."
-  (interactive)
-  (unless gptel-bedrock-discovered-models
-    (user-error "No models discovered yet. Run M-x gptel-bedrock-discover-models first"))
-  
-  (with-current-buffer (get-buffer-create "*Bedrock Models*")
-    (erase-buffer)
-    (insert "# Available AWS Bedrock Models\n\n")
-    (insert "Add any of these to your configuration with:\n\n")
-    (insert "(setq gptel-bedrock-custom-models\n")
-    (insert "      (append gptel-bedrock-custom-models\n")
-    (insert "             '(")
-    (dolist (model gptel-bedrock-discovered-models)
-      (let ((sym (car model))
-            (props (cdr model)))
-        (insert (format "\n        ;; %s\n" 
-                        (or (plist-get props :name) sym)))
-        (insert (format "        (%s :id \"%s\"" 
-                        sym (plist-get props :id)))
-        (when-let ((desc (plist-get props :description)))
-          (insert (format "\n         :description %S" desc)))
-        (when-let ((caps (plist-get props :capabilities)))
-          (insert (format "\n         :capabilities %S" caps)))
-        (insert ")")))
-    (insert ")))\n\n")
-    (special-mode)
-    (display-buffer (current-buffer))))
-
-(defun gptel-bedrock--get-model-id (model)
-  "Resolve MODEL symbol to Bedrock model ID.
-If MODEL is a string, assume it's already a proper model ID."
-  (cond
-   ((stringp model) model) ;; Already an ID string
-   ((symbolp model)
-    (or (gptel-bedrock--get-model-property model :id)
-        (error "Unknown model: %s" model)))
-   (t (error "Invalid model specification: %S" model))))
-
-(defun gptel-bedrock--get-model-property (model property)
-  "Get PROPERTY for MODEL from combined model registry."
-  (let ((model-sym (if (stringp model)
-                      (gptel-bedrock--id-to-symbol model)
-                    model)))
-    (or (plist-get (cdr (assq model-sym gptel-bedrock-custom-models)) property)
-        (plist-get (cdr (assq model-sym gptel--bedrock-models)) property)
-        (plist-get (cdr (assq model-sym gptel-bedrock-discovered-models)) property))))
-
-(defun gptel-bedrock--id-to-symbol (model-id)
-  "Convert MODEL-ID to a symbolic name.
-Returns nil if no matching symbol is found."
-  (or (car (cl-find-if (lambda (model)
-                          (equal (plist-get (cdr model) :id) model-id))
-                        gptel--bedrock-models))
-      (car (cl-find-if (lambda (model)
-                          (equal (plist-get (cdr model) :id) model-id))
-                        gptel-bedrock-custom-models))
-      (car (cl-find-if (lambda (model)
-                          (equal (plist-get (cdr model) :id) model-id))
-                        gptel-bedrock-discovered-models))))
-
-(defun gptel-bedrock--infer-symbolic-name (model-id)
-  "Suggest a symbol name for MODEL-ID."
-  (let* ((parts (split-string model-id "\\."))
-         (provider (nth 0 parts))
-         (model-name (nth 1 parts)))
-    (when model-name
-      (let* ((name (replace-regexp-in-string "-v[0-9]+:[0-9]+$" "" model-name))
-             (name (replace-regexp-in-string "_" "-" name)))
-        (intern (downcase (concat provider "-" name)))))))
+(defun gptel-bedrock--get-model-id (model &optional region)
+  "Return the Bedrock model ID for MODEL.
+   REGION one of {'apac 'eu 'us}"
+  (concat
+   (when region
+     (or (member region '(apac eu us))
+	 (error "Unknown Bedrock region %s" region))
+     (concat (symbol-name region) "."))
+   (or (alist-get model gptel-bedrock-model-ids nil nil #'eq)
+       (error "Unknown Bedrock model: %s" model))))
 
 (defun gptel-bedrock--curl-args (region)
   "Generate the curl arguments to get a bedrock request signed for use in REGION."
@@ -823,70 +587,51 @@ Returns nil if no matching symbol is found."
      (when token
        (list (format "-Hx-amz-security-token: %s" token))))))
 
+(defun gptel-bedrock--curl-version ()
+  (let* ((output (shell-command-to-string "curl --version"))
+         (version (and (string-match "^curl \\([0-9.]+\\)" output)
+                       (match-string 1 output))))
+    version))
+
 ;;;###autoload
 (cl-defun gptel-make-bedrock
     (name &key
           region
           (models gptel--bedrock-models)
+	  (model-region nil)
           (stream nil)
-          (protocol "https")
-          (profile nil)
-          request-params)
+	  curl-args
+          (protocol "https"))
   "Register an AWS Bedrock backend for gptel with NAME.
 
 Keyword arguments:
 
 REGION - AWS region name (e.g. \"us-east-1\")
-MODELS - The list of models supported by this backend. Can be:
-  - A list of model symbols like '(claude-3-sonnet mistral-large-2407)
-  - A list of plists with model details like '((my-claude :id \"anthropic.claude...\"))
-  - nil to use all built-in models
-STREAM - Whether to use streaming responses or not
-PROTOCOL - Protocol to use (defaults to \"https\")
-PROFILE - AWS credential profile to use (defaults to \"default\")
-REQUEST-PARAMS - Additional parameters for the API request"
+MODELS - The list of models supported by this backend
+MODEL-REGION - one of {'apac 'eu 'us} or nil
+CURL-ARGS - additional curl args
+STREAM - Whether to use streaming responses or not."
   (declare (indent 1))
-  ;; Process custom models in the models argument
-  (when (and models (consp (car models)) (not (keywordp (cadar models))))
-    ;; If models contains detailed specifications, add them to custom models
-    (dolist (model-spec models)
-      (when (and (listp model-spec) (symbolp (car model-spec)))
-        (let ((sym (car model-spec))
-              (props (cdr model-spec)))
-          (when (and props (plist-get props :id))
-            (setq gptel-bedrock-custom-models 
-                  (cons model-spec 
-                        (cl-remove sym gptel-bedrock-custom-models :key #'car))))))))
-  
-  (let* ((host (format "bedrock-runtime.%s.amazonaws.com" region))
-         ;; Process models argument
-         (processed-models 
-          (cond
-           ;; Handle nil - use all built-in models
-           ((null models) 
-            (gptel--process-models (mapcar #'car gptel--bedrock-models)))
-           ;; Handle list of symbols
-           ((and (consp models) (symbolp (car models)))
-            (gptel--process-models models))
-           ;; If it's already processed, use it
-           (t models))))
-
+  (unless (and gptel-use-curl (version<= "8.5" (gptel-bedrock--curl-version)))
+    (error "Bedrock-backend requires curl >= 8.5, but gptel-use-curl := %s, curl-version := %s"
+           gptel-use-curl (gptel-bedrock--curl-version)))
+  (let ((host (format "bedrock-runtime.%s.amazonaws.com" region)))
     (setf (alist-get name gptel--known-backends nil nil #'equal)
           (gptel--make-bedrock
            :name name
            :host host
            :header nil           ; x-amz-security-token is set in curl-args if needed
-           :models processed-models
+           :models (gptel--process-models models)
+	   :model-region model-region
            :protocol protocol
            :endpoint "" ; Url is dynamically constructed based on other args
            :stream stream
            :coding-system (and stream 'binary)
-           :request-params request-params
-           :curl-args (lambda () (gptel-bedrock--curl-args region profile))
+           :curl-args (lambda () (append curl-args (gptel-bedrock--curl-args region)))
            :url
            (lambda ()
              (concat protocol "://" host
-                     "/model/" (gptel-bedrock--get-model-id gptel-model)
+                     "/model/" (gptel-bedrock--get-model-id gptel-model model-region)
                      "/" (if stream "converse-stream" "converse")))
            ))))
 
