@@ -582,8 +582,8 @@ IDs can be added or replaced by calling
      (list
       "--user" (format "%s:%s" key-id secret)
       "--aws-sigv4" (format "aws:amz:%s:bedrock" region))
-     (unless (memq system-type '(windows-nt ms-dos))
-       (list "--output" "/dev/stdout")) ;; Linux: Without this curl swallows the output
+     ;; (unless (memq system-type '(windows-nt ms-dos))
+     ;;   (list "--output" "/dev/stdout")) ;; Linux: Without this curl swallows the output
      (when token
        (list (format "-Hx-amz-security-token: %s" token))))))
 
